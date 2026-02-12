@@ -1,129 +1,170 @@
-# PawRide Backend (Phase 1 Foundation)
+# PawRide (All Phases Scaffolded)
 
-Backend API for **PawRide**, a dog-only rideshare platform that supports one iOS app with three switchable roles:
+PawRide is an Uber-style platform focused on safe dog transportation, with:
 
-- `dog_parent`
-- `driver`
-- `admin`
-
-This implementation is a FastAPI monolith with SQLModel persistence and websocket realtime channels.
-
-## What is implemented
-
-### Auth & Role Switching
-- Phone OTP auth (`/auth/request-otp`, `/auth/verify-otp`)
-- Access + refresh JWT token flow
-- Multi-role user model (`user_roles`)
-- Active-role switching (`/auth/switch-role`)
-
-### Dog Parent Data
-- Dogs CRUD (`/dogs`)
-- Trusted receivers CRUD with 6-digit PIN (`/trusted-receivers`)
-- Saved destinations CRUD (`/saved-destinations`)
-
-### Rides
-- Ride request + fare estimate + lifecycle status transitions
-- Cancellation policy:
-  - Free in first 2 minutes
-  - `$5` en route
-  - `$15` once dog is onboard
-- Scheduled rides (up to 7 days)
-- Recurring rule field support
-- Trusted person dropoff verification:
-  - PIN + photo-match flag
-  - 3 failed attempts trigger lockout
-- Facility dropoff verification photo flow
-- Ride event timeline (`/rides/{ride_id}/events`)
-
-### Driver
-- Become-driver endpoint + onboarding profile shell (`/drivers/become-driver`, `/drivers/me/profile`)
-- Online/offline state
-- Available-driver query (size + rating + approval aware)
-- Earnings summary
-
-### Payments
-- Saved payment methods
-- Ride charge flow (promo + tip + configurable driver commission split)
-- Refund endpoint
-- Promo code create endpoint (admin)
-
-### Ratings
-- 1–5 star ratings with dog comfort score, comments, and tags
-
-### Admin
-- User list + role assignment/removal
-- Ride list
-- Driver approval queue + decision endpoint
-- Basic analytics dashboard stats
-- Promo code list
-
-### Camera + Realtime
-- Camera stream start/join/end endpoints
-- Snapshot + camera alert events
-- Websocket channels:
-  - `/ws/rides/{ride_id}` for ride status/camera event fan-out
-  - `/ws/drivers/{driver_user_id}/location` for location updates
+- **One app** and **three roles** (`dog_parent`, `driver`, `admin`)
+- Live in-car camera flow
+- Verified dog handoff workflows
+- Payments + payouts + promo + subscription hooks
+- Real-time dispatch and status updates
 
 ---
 
-## Tech stack
+## ✅ What is implemented (labeled by phase)
 
-- **FastAPI**
-- **SQLModel / SQLAlchemy**
-- **SQLite** by default (swap `DATABASE_URL` for Postgres)
-- **python-jose** JWT auth
+## Phase 1 — Backend Foundation
+
+- FastAPI + SQLModel backend
+- OTP auth (`/auth/request-otp`, `/auth/verify-otp`)
+- Access/refresh token support
+- Multi-role users + active role switching
+- CRUD: dogs, trusted receivers, saved destinations
+- Core ride model and ride lifecycle
+
+## Phase 2 — Ride Matching & Dog Logic
+
+- Dispatch engine with dog-specific matching:
+  - max dog size compatibility
+  - crate requirement checks from dog profile
+  - driver approval/online/rating checks
+  - max dogs per ride checks
+- Closest-driver offer ordering using latest driver locations
+- 15-second driver offer windows
+- Radius expansion when no driver accepts
+- Scheduled matching lead-time support
+- Recurring ride plan generation
+- Cancellation fee policy implemented
+
+## Phase 3 — iOS App Shell, Auth, Role Switching
+
+- SwiftUI source scaffold in `ios/PawRide`
+- Auth flow + role picker + role switching
+- Role-based root routing
+- Parent/Driver/Admin tab shells
+
+## Phase 4 — Dog Parent Mode (build scaffold)
+
+- Parent home + ride request form
+- Dog list, ride history, payment shell, settings
+- Active ride tracking screen with camera/realtime placeholders
+
+## Phase 5 — Driver Mode (build scaffold)
+
+- Driver home with online toggle
+- Incoming offer list + accept action
+- Earnings, documents, ride history, onboarding, settings screens
+
+## Phase 6 — Live Camera System (backend)
+
+- Stream start/join/end endpoints
+- Camera session table with reconnect tracking
+- Snapshot + alert events
+- Auto snapshot background worker
+- Auto stream end on ride completion
+
+## Phase 7 — Payments & Tipping
+
+- Payment methods + charge + refund
+- Promo code management
+- Driver payout records (weekly + instant payout flow)
+- Subscription plan + user subscription endpoints (PawRide Pass)
+- Subscription discount applied at charge
+
+## Phase 8 — Admin Mode
+
+- Admin user/role management
+- Driver approval workflows
+- Ride and dispute management
+- Platform settings storage
+- Analytics endpoints:
+  - overview
+  - rides by type
+  - peak hours
+  - driver utilization
+  - rating trends
+- Alerts endpoint
+
+## Phase 9 — Notifications & Polish (backend side)
+
+- Notification event queue model
+- User notification feed + mark-read endpoints
+- Status/camera/dispatch notification creation hooks
+- Scheduled ride reminder background task
 
 ---
 
-## Quick start
+## Project layout
 
-### 1) Install dependencies
+- `app/` → backend API
+- `ios/PawRide/` → SwiftUI source scaffold
+- `Dockerfile` → containerized backend run/deploy
+
+---
+
+## Run locally (backend)
+
+### 1) Install
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
 ```
 
-### 2) Configure environment
+### 2) Configure
 
 ```bash
 cp .env.example .env
 ```
 
-### 3) Run API
+### 3) Start server
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
 Open:
-- Swagger UI: `http://127.0.0.1:8000/docs`
+
+- Swagger: `http://127.0.0.1:8000/docs`
 - Health: `http://127.0.0.1:8000/health`
 
 ---
 
-## Notes for development
+## Run with Docker
 
-- OTP endpoint returns `dev_code` when `ENVIRONMENT != production`.
-- New users always get `dog_parent`.
-- Additional roles can be attached during OTP verification via `requested_roles`.
-- Database tables auto-create on startup.
-
----
-
-## Ride lifecycle states
-
-`requested -> accepted -> driver_en_route -> arrived_at_pickup -> dog_picked_up -> in_transit -> arrived_at_dropoff -> verifying_receiver -> dog_delivered -> completed`
-
-Cancellation is allowed where appropriate and tracked with reason/fee/timestamp.
+```bash
+docker build -t pawride-api .
+docker run -p 8000:8000 pawride-api
+```
 
 ---
 
-## Next phase ideas
+## Free online deployment (easy path)
 
-- Add dispatch engine with driver offer timeouts and expanding search radius
-- Real Stripe + Connect integration
-- Real media storage + stream orchestration (WebRTC/TURN)
-- Push notifications and background jobs
-- Production auth hardening and permission granularity
+You can run this backend online for free-tier usage with **Render**:
+
+1. Push this repo to GitHub.
+2. In Render: **New + → Web Service → connect repo**
+3. Runtime: **Docker**
+4. Start command is already in `Dockerfile`.
+5. Set env vars from `.env.example` (at minimum set `JWT_SECRET`).
+6. Deploy and use your Render URL in the iOS app `APIClient.baseURL`.
+
+---
+
+## iOS source usage
+
+1. Open Xcode and create an iOS App project.
+2. Copy files from `ios/PawRide/` into project.
+3. Point `APIClient.baseURL` to local/online backend URL.
+4. Run on simulator/device.
+
+More details: `ios/PawRide/README.md`
+
+---
+
+## Notes
+
+- OTP endpoint returns `dev_code` in non-production for quick testing.
+- SQLite is default; set `DATABASE_URL` to Postgres for production.
+- Background worker handles dispatch loops, reminders, snapshots, and payout processing.

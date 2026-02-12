@@ -1,0 +1,7 @@
+.git
+.venv
+__pycache__
+*.pyc
+pawride.db
+ios
+tests
