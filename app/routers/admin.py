@@ -5,18 +5,31 @@ from app.database import get_session
 from app.dependencies import get_current_user
 from app.models import (
     Dog,
+    Dispute,
+    DisputeStatus,
     DriverApprovalStatus,
+    DriverPayout,
     DriverProfile,
+    NotificationEvent,
     Payment,
     PaymentStatus,
+    PayoutStatus,
+    PlatformSetting,
     PromoCode,
+    ReceiverVerificationAttempt,
     Ride,
     RideStatus,
     Role,
     User,
     UserRole,
 )
-from app.schemas import AdminAssignRoleRequest, AdminDriverApprovalRequest, AdminRemoveRoleRequest
+from app.schemas import (
+    AdminAssignRoleRequest,
+    AdminDriverApprovalRequest,
+    AdminRemoveRoleRequest,
+    DisputeResolveRequest,
+    PlatformSettingUpsertRequest,
+)
 from app.security import utcnow
 from app.services import ensure_role, list_user_roles
 
@@ -211,3 +224,164 @@ def list_promo_codes(
 ) -> list[PromoCode]:
     _require_admin(session, current_user.id)
     return session.exec(select(PromoCode).order_by(PromoCode.created_at.desc())).all()
+
+
+@router.get("/disputes")
+def list_disputes(
+    status_filter: DisputeStatus | None = Query(default=None),
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> list[Dispute]:
+    _require_admin(session, current_user.id)
+    stmt = select(Dispute).order_by(Dispute.created_at.desc())
+    if status_filter:
+        stmt = stmt.where(Dispute.status == status_filter)
+    return session.exec(stmt).all()
+
+
+@router.post("/disputes/{dispute_id}/resolve")
+def resolve_dispute(
+    dispute_id: str,
+    payload: DisputeResolveRequest,
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> Dispute:
+    _require_admin(session, current_user.id)
+    dispute = session.get(Dispute, dispute_id)
+    if not dispute:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dispute not found")
+    dispute.status = payload.status
+    dispute.resolution_note = payload.resolution_note
+    dispute.refund_payment_id = payload.refund_payment_id
+    dispute.resolved_by_user_id = current_user.id
+    dispute.resolved_at = utcnow()
+    dispute.updated_at = utcnow()
+    session.add(dispute)
+    session.commit()
+    session.refresh(dispute)
+    return dispute
+
+
+@router.get("/settings")
+def list_platform_settings(
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> list[PlatformSetting]:
+    _require_admin(session, current_user.id)
+    return session.exec(select(PlatformSetting).order_by(PlatformSetting.key.asc())).all()
+
+
+@router.post("/settings")
+def upsert_platform_setting(
+    payload: PlatformSettingUpsertRequest,
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> PlatformSetting:
+    _require_admin(session, current_user.id)
+    setting = session.get(PlatformSetting, payload.key)
+    if not setting:
+        setting = PlatformSetting(key=payload.key, value=payload.value, updated_by_user_id=current_user.id)
+    else:
+        setting.value = payload.value
+        setting.updated_by_user_id = current_user.id
+        setting.updated_at = utcnow()
+    session.add(setting)
+    session.commit()
+    session.refresh(setting)
+    return setting
+
+
+@router.get("/analytics/rides-by-type")
+def rides_by_type(
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> dict:
+    _require_admin(session, current_user.id)
+    rides = session.exec(select(Ride)).all()
+    counts: dict[str, int] = {}
+    for ride in rides:
+        key = ride.dropoff_type.value
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+@router.get("/analytics/peak-hours")
+def peak_hours(
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> dict:
+    _require_admin(session, current_user.id)
+    rides = session.exec(select(Ride)).all()
+    by_hour: dict[str, int] = {}
+    for ride in rides:
+        hour = _aware(ride.requested_at).strftime("%H:00")
+        by_hour[hour] = by_hour.get(hour, 0) + 1
+    return by_hour
+
+
+@router.get("/analytics/driver-utilization")
+def driver_utilization(
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> list[dict]:
+    _require_admin(session, current_user.id)
+    drivers = session.exec(select(DriverProfile)).all()
+    result = []
+    for driver in drivers:
+        driver_rides = session.exec(
+            select(Ride).where(Ride.driver_user_id == driver.user_id, Ride.status == RideStatus.COMPLETED)
+        ).all()
+        revenue = session.exec(
+            select(Payment).where(Payment.driver_user_id == driver.user_id, Payment.status == PaymentStatus.CHARGED)
+        ).all()
+        result.append(
+            {
+                "driver_user_id": driver.user_id,
+                "completed_rides": len(driver_rides),
+                "rating": driver.rating,
+                "is_online": driver.is_online,
+                "gross_revenue": round(sum(p.driver_payout_amount for p in revenue), 2),
+            }
+        )
+    return result
+
+
+@router.get("/analytics/rating-trends")
+def rating_trends(
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> dict:
+    _require_admin(session, current_user.id)
+    drivers = session.exec(select(DriverProfile)).all()
+    if not drivers:
+        return {"average_driver_rating": 0.0, "driver_count": 0}
+    return {
+        "average_driver_rating": round(sum(driver.rating for driver in drivers) / len(drivers), 2),
+        "driver_count": len(drivers),
+    }
+
+
+@router.get("/alerts")
+def admin_alerts(
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> dict:
+    _require_admin(session, current_user.id)
+    failed_verifications = session.exec(
+        select(ReceiverVerificationAttempt).where(ReceiverVerificationAttempt.success.is_(False))
+    ).all()
+    unresolved_disputes = session.exec(
+        select(Dispute).where(Dispute.status.in_([DisputeStatus.OPEN, DisputeStatus.IN_REVIEW]))
+    ).all()
+    recent_notifications = session.exec(
+        select(NotificationEvent).order_by(NotificationEvent.created_at.desc()).limit(20)
+    ).all()
+    pending_payouts = session.exec(
+        select(DriverPayout).where(DriverPayout.status == PayoutStatus.PENDING)
+    ).all()
+    return {
+        "failed_verifications": len(failed_verifications),
+        "unresolved_disputes": len(unresolved_disputes),
+        "pending_payouts": len(pending_payouts),
+        "recent_notifications": len(recent_notifications),
+    }

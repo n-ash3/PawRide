@@ -1,11 +1,13 @@
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import Session, select
 
+from app.config import settings
 from app.database import get_session
 from app.dependencies import get_current_user
-from app.models import CameraEvent, Ride, Role
+from app.models import CameraEvent, CameraSession, NotificationChannel, Ride, Role
+from app.notifications import enqueue_notification, mark_notification_sent
 from app.realtime import realtime_manager
 from app.schemas import CameraAlertRequest, CameraSnapshotRequest, CameraStartRequest
 from app.security import utcnow
@@ -39,6 +41,23 @@ async def start_stream(
     stream_url = payload.stream_url or f"webrtc://pawride.local/ride/{ride.id}/{uuid4().hex}"
     ride.camera_stream_url = stream_url
     ride.updated_at = utcnow()
+    existing_session = session.exec(select(CameraSession).where(CameraSession.ride_id == ride.id)).first()
+    if existing_session:
+        existing_session.stream_url = stream_url
+        existing_session.is_active = True
+        existing_session.started_at = utcnow()
+        existing_session.ended_at = None
+        existing_session.snapshot_interval_minutes = settings.camera_auto_snapshot_interval_minutes
+        session.add(existing_session)
+    else:
+        session.add(
+            CameraSession(
+                ride_id=ride.id,
+                stream_url=stream_url,
+                started_by_user_id=current_user.id,
+                snapshot_interval_minutes=settings.camera_auto_snapshot_interval_minutes,
+            )
+        )
     event = CameraEvent(
         ride_id=ride.id,
         event_type="stream_started",
@@ -47,6 +66,16 @@ async def start_stream(
     )
     session.add(ride)
     session.add(event)
+    notify = enqueue_notification(
+        session,
+        user_id=ride.dog_parent_user_id,
+        notification_type="camera_stream_started",
+        title="Live camera is ready",
+        body="Your dog's in-car camera stream is now available.",
+        data={"ride_id": ride.id, "stream_url": stream_url},
+        channel=NotificationChannel.PUSH,
+    )
+    mark_notification_sent(session, notify)
     session.commit()
     await realtime_manager.broadcast_ride(
         ride.id,
@@ -58,6 +87,7 @@ async def start_stream(
 @router.post("/rides/{ride_id}/join")
 async def join_stream(
     ride_id: str,
+    reconnect: bool = Query(default=False),
     session: Session = Depends(get_session),
     current_user=Depends(get_current_user),
 ) -> dict:
@@ -65,6 +95,11 @@ async def join_stream(
     assert_ride_access(session, ride, current_user)
     if not ride.camera_stream_url:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No active stream for this ride")
+    session_row = session.exec(select(CameraSession).where(CameraSession.ride_id == ride.id)).first()
+    if session_row and reconnect:
+        session_row.reconnect_count += 1
+        session.add(session_row)
+        session.commit()
     return {"ride_id": ride.id, "stream_url": ride.camera_stream_url}
 
 
@@ -84,6 +119,10 @@ async def snapshot(
         snapshot_url=payload.snapshot_url,
         created_by_user_id=current_user.id,
     )
+    camera_session = session.exec(select(CameraSession).where(CameraSession.ride_id == ride.id)).first()
+    if camera_session:
+        camera_session.last_snapshot_at = utcnow()
+        session.add(camera_session)
     session.add(event)
     session.commit()
     session.refresh(event)
@@ -116,6 +155,16 @@ async def camera_alert(
         created_by_user_id=current_user.id,
     )
     session.add(event)
+    parent_notification = enqueue_notification(
+        session,
+        user_id=ride.dog_parent_user_id,
+        notification_type=f"camera_alert_{payload.event_type}",
+        title="PawRide camera alert",
+        body=payload.details or f"Alert: {payload.event_type}",
+        data={"ride_id": ride.id, "event_type": payload.event_type},
+        channel=NotificationChannel.PUSH,
+    )
+    mark_notification_sent(session, parent_notification)
     session.commit()
     session.refresh(event)
     await realtime_manager.broadcast_ride(
@@ -136,6 +185,11 @@ async def end_stream(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Driver or admin required")
     ride.camera_stream_url = None
     ride.updated_at = utcnow()
+    session_row = session.exec(select(CameraSession).where(CameraSession.ride_id == ride.id)).first()
+    if session_row:
+        session_row.is_active = False
+        session_row.ended_at = utcnow()
+        session.add(session_row)
     event = CameraEvent(
         ride_id=ride.id,
         event_type="stream_ended",
@@ -144,6 +198,16 @@ async def end_stream(
     )
     session.add(ride)
     session.add(event)
+    notify = enqueue_notification(
+        session,
+        user_id=ride.dog_parent_user_id,
+        notification_type="camera_stream_ended",
+        title="Live camera ended",
+        body="In-car stream ended for this ride.",
+        data={"ride_id": ride.id},
+        channel=NotificationChannel.PUSH,
+    )
+    mark_notification_sent(session, notify)
     session.commit()
     await realtime_manager.broadcast_ride(
         ride.id,
@@ -161,3 +225,14 @@ def camera_events(
     ride = _ride_or_404(session, ride_id)
     assert_ride_access(session, ride, current_user)
     return session.exec(select(CameraEvent).where(CameraEvent.ride_id == ride.id).order_by(CameraEvent.created_at.asc())).all()
+
+
+@router.get("/rides/{ride_id}/session")
+def camera_session_status(
+    ride_id: str,
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> CameraSession | None:
+    ride = _ride_or_404(session, ride_id)
+    assert_ride_access(session, ride, current_user)
+    return session.exec(select(CameraSession).where(CameraSession.ride_id == ride.id)).first()

@@ -7,11 +7,16 @@ from pydantic import BaseModel, Field
 from app.models import (
     BackgroundCheckStatus,
     DogSize,
+    DisputeStatus,
     DriverApprovalStatus,
     DropoffType,
+    NotificationChannel,
+    NotificationStatus,
+    PayoutStatus,
     PaymentStatus,
     RideStatus,
     Role,
+    SubscriptionStatus,
 )
 
 
@@ -165,6 +170,7 @@ class RideRequestCreate(BaseModel):
     duration_minutes: float = 0.0
     surge_multiplier: float = 1.0
     dog_count: int = 1
+    auto_dispatch: bool = True
 
 
 class RideAssignDriverRequest(BaseModel):
@@ -179,6 +185,11 @@ class RideStatusUpdateRequest(BaseModel):
 
 class RideCancelRequest(BaseModel):
     reason: str | None = None
+
+
+class DispatchResponseRequest(BaseModel):
+    accept: bool
+    decline_reason: str | None = None
 
 
 class TrustedDropoffVerificationRequest(BaseModel):
@@ -307,3 +318,69 @@ class PaymentOut(BaseModel):
     driver_payout_amount: float
     platform_fee_amount: float
     created_at: datetime
+
+
+class SubscriptionCreateRequest(BaseModel):
+    plan_code: str = "PAWRIDE_PASS"
+
+
+class SubscriptionCancelRequest(BaseModel):
+    immediate: bool = False
+
+
+class PayoutInstantRequest(BaseModel):
+    payout_id: str
+
+
+class PlatformSettingUpsertRequest(BaseModel):
+    key: str
+    value: str
+
+
+class DisputeCreateRequest(BaseModel):
+    ride_id: str
+    against_user_id: str | None = None
+    reason: str
+    details: str | None = None
+
+
+class DisputeResolveRequest(BaseModel):
+    status: DisputeStatus
+    resolution_note: str | None = None
+    refund_payment_id: str | None = None
+
+
+class NotificationMarkReadRequest(BaseModel):
+    notification_ids: list[str] = Field(default_factory=list)
+
+
+class NotificationOut(BaseModel):
+    id: str
+    notification_type: str
+    title: str
+    body: str
+    channel: NotificationChannel
+    status: NotificationStatus
+    created_at: datetime
+    read_at: datetime | None = None
+
+
+class DriverPayoutOut(BaseModel):
+    id: str
+    payment_id: str | None
+    amount: float
+    currency: str
+    status: PayoutStatus
+    method: str
+    fee_amount: float
+    scheduled_for: datetime
+    processed_at: datetime | None = None
+
+
+class UserSubscriptionOut(BaseModel):
+    id: str
+    plan_id: str
+    status: SubscriptionStatus
+    started_at: datetime
+    renews_at: datetime | None
+    ended_at: datetime | None

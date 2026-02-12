@@ -1,17 +1,42 @@
+from datetime import timedelta
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
 
+from app.billing import (
+    active_subscription_for_user,
+    get_or_create_default_plan,
+    process_instant_payout,
+    process_weekly_payouts,
+    schedule_driver_payout,
+    subscription_discount_percent,
+)
 from app.config import settings
 from app.database import get_session
 from app.dependencies import get_current_user
-from app.models import DriverProfile, Payment, PaymentMethod, PaymentStatus, PromoCode, Ride, Role
+from app.models import (
+    DriverProfile,
+    DriverPayout,
+    Payment,
+    PaymentMethod,
+    PaymentStatus,
+    PromoCode,
+    Ride,
+    RideStatus,
+    Role,
+    SubscriptionPlan,
+    SubscriptionStatus,
+    UserSubscription,
+)
 from app.schemas import (
     ChargeRideRequest,
     PaymentMethodCreateRequest,
+    PayoutInstantRequest,
     PromoCodeCreateRequest,
     RefundPaymentRequest,
+    SubscriptionCancelRequest,
+    SubscriptionCreateRequest,
 )
 from app.security import utcnow
 from app.services import list_user_roles
@@ -74,6 +99,11 @@ def charge_ride(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Payment access denied")
     if not ride.driver_user_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ride has no assigned driver")
+    if ride.status not in {RideStatus.DOG_DELIVERED, RideStatus.COMPLETED}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ride must be delivered or completed before charge",
+        )
 
     payment_method = session.get(PaymentMethod, payload.payment_method_id)
     if not payment_method or payment_method.user_id != current_user.id:
@@ -98,7 +128,14 @@ def charge_ride(
         promo.used_count += 1
         session.add(promo)
 
-    subtotal = max(0.0, ride.fare_total - discount_amount)
+    pass_discount_percent = subscription_discount_percent(session, current_user.id)
+    subscription_discount_amount = 0.0
+    if pass_discount_percent > 0:
+        subscription_discount_amount = round(
+            max(0.0, ride.fare_total - discount_amount) * (pass_discount_percent / 100.0), 2
+        )
+    total_discount = round(discount_amount + subscription_discount_amount, 2)
+    subtotal = max(0.0, ride.fare_total - total_discount)
     tip_amount = max(0.0, payload.tip_amount)
     total_amount = round(subtotal + tip_amount, 2)
 
@@ -116,11 +153,19 @@ def charge_ride(
         tip_amount=tip_amount,
         currency=settings.default_currency,
         promo_code=payload.promo_code,
-        discount_amount=discount_amount,
+        discount_amount=total_discount,
         driver_payout_amount=driver_payout_amount,
         platform_fee_amount=platform_fee_amount,
     )
     session.add(payment)
+    session.flush()
+    schedule_driver_payout(
+        session,
+        driver_user_id=ride.driver_user_id,
+        payment_id=payment.id,
+        amount=driver_payout_amount,
+        currency=settings.default_currency,
+    )
 
     profile = session.exec(select(DriverProfile).where(DriverProfile.user_id == ride.driver_user_id)).first()
     if profile:
@@ -198,3 +243,117 @@ def create_promo_code(
     session.commit()
     session.refresh(promo)
     return promo
+
+
+@router.get("/subscription/plans")
+def subscription_plans(
+    session: Session = Depends(get_session),
+    _current_user=Depends(get_current_user),
+) -> list[SubscriptionPlan]:
+    get_or_create_default_plan(session)
+    session.commit()
+    return session.exec(select(SubscriptionPlan).where(SubscriptionPlan.is_active.is_(True))).all()
+
+
+@router.get("/subscription/me")
+def my_subscription(
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> UserSubscription | None:
+    subscription = active_subscription_for_user(session, current_user.id)
+    session.commit()
+    return subscription
+
+
+@router.post("/subscription/subscribe", status_code=status.HTTP_201_CREATED)
+def subscribe_pass(
+    payload: SubscriptionCreateRequest,
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> UserSubscription:
+    plan = session.exec(select(SubscriptionPlan).where(SubscriptionPlan.code == payload.plan_code)).first()
+    if not plan:
+        plan = get_or_create_default_plan(session)
+    if not plan.is_active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Plan is not active")
+    active = active_subscription_for_user(session, current_user.id)
+    if active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User already has an active subscription")
+    subscription = UserSubscription(
+        user_id=current_user.id,
+        plan_id=plan.id,
+        status=SubscriptionStatus.ACTIVE,
+        started_at=utcnow(),
+        renews_at=utcnow() + timedelta(days=30),
+    )
+    session.add(subscription)
+    session.commit()
+    session.refresh(subscription)
+    return subscription
+
+
+@router.post("/subscription/cancel")
+def cancel_subscription(
+    payload: SubscriptionCancelRequest,
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> UserSubscription:
+    subscription = active_subscription_for_user(session, current_user.id)
+    if not subscription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No active subscription found")
+    subscription.status = SubscriptionStatus.CANCELED
+    if payload.immediate:
+        subscription.ended_at = utcnow()
+    subscription.updated_at = utcnow()
+    session.add(subscription)
+    session.commit()
+    session.refresh(subscription)
+    return subscription
+
+
+@router.get("/payouts/me")
+def my_payouts(
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> list[DriverPayout]:
+    roles = set(list_user_roles(session, current_user.id))
+    if Role.DRIVER not in roles and Role.ADMIN not in roles:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Driver or admin role required")
+    if Role.ADMIN in roles:
+        return session.exec(select(DriverPayout).order_by(DriverPayout.created_at.desc())).all()
+    return session.exec(
+        select(DriverPayout)
+        .where(DriverPayout.driver_user_id == current_user.id)
+        .order_by(DriverPayout.created_at.desc())
+    ).all()
+
+
+@router.post("/payouts/instant")
+def instant_payout(
+    payload: PayoutInstantRequest,
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> DriverPayout:
+    payout = session.get(DriverPayout, payload.payout_id)
+    if not payout:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payout not found")
+    roles = set(list_user_roles(session, current_user.id))
+    if payout.driver_user_id != current_user.id and Role.ADMIN not in roles:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Payout access denied")
+    payout = process_instant_payout(session, payout)
+    session.commit()
+    session.refresh(payout)
+    return payout
+
+
+@router.post("/payouts/run-weekly")
+def run_weekly_payout(
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> dict:
+    roles = set(list_user_roles(session, current_user.id))
+    if Role.ADMIN not in roles:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+    processed = process_weekly_payouts(session)
+    session.commit()
+    return {"processed": processed}

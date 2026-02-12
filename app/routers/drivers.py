@@ -3,7 +3,16 @@ from sqlmodel import Session, select
 
 from app.database import get_session
 from app.dependencies import get_current_user
-from app.models import DogSize, DriverProfile, DriverApprovalStatus, Payment, PaymentStatus, Role
+from app.models import (
+    DogSize,
+    DriverApprovalStatus,
+    DriverOfferResponse,
+    DriverProfile,
+    Payment,
+    PaymentStatus,
+    RideDispatchAttempt,
+    Role,
+)
 from app.schemas import BecomeDriverRequest, DriverOnlineRequest, DriverProfileUpsertRequest
 from app.security import utcnow
 from app.services import ensure_role, list_user_roles
@@ -140,3 +149,26 @@ def list_available_drivers(
             DriverProfile.max_dog_size.in_(compatible_sizes),
         )
     ).all()
+
+
+@router.get("/me/offers")
+def my_open_offers(
+    session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
+) -> list[RideDispatchAttempt]:
+    _ensure_driver_role(session, current_user.id)
+    offers = session.exec(
+        select(RideDispatchAttempt)
+        .where(
+            RideDispatchAttempt.driver_user_id == current_user.id,
+            RideDispatchAttempt.response == DriverOfferResponse.PENDING,
+        )
+        .order_by(RideDispatchAttempt.offered_at.desc())
+    ).all()
+    now = utcnow()
+    valid = []
+    for offer in offers:
+        expires_at = offer.expires_at if offer.expires_at.tzinfo else offer.expires_at.replace(tzinfo=now.tzinfo)
+        if expires_at > now:
+            valid.append(offer)
+    return valid

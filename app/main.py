@@ -1,9 +1,24 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.background import background_worker
 from app.config import settings
 from app.database import init_db
-from app.routers import admin, auth, camera, dogs, drivers, payments, ratings, realtime, rides, saved_destinations, trusted_receivers
+from app.routers import (
+    admin,
+    auth,
+    camera,
+    disputes,
+    dogs,
+    drivers,
+    notifications,
+    payments,
+    ratings,
+    realtime,
+    rides,
+    saved_destinations,
+    trusted_receivers,
+)
 
 app = FastAPI(
     title=settings.app_name,
@@ -21,8 +36,14 @@ app.add_middleware(
 
 
 @app.on_event("startup")
-def on_startup() -> None:
+async def on_startup() -> None:
     init_db()
+    await background_worker.start()
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    await background_worker.stop()
 
 
 @app.get("/health")
@@ -40,4 +61,6 @@ app.include_router(payments.router)
 app.include_router(ratings.router)
 app.include_router(camera.router)
 app.include_router(admin.router)
+app.include_router(disputes.router)
+app.include_router(notifications.router)
 app.include_router(realtime.router)

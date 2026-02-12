@@ -75,6 +75,50 @@ class BackgroundCheckStatus(str, Enum):
     FAILED = "failed"
 
 
+class DriverOfferResponse(str, Enum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    TIMED_OUT = "timed_out"
+
+
+class PayoutStatus(str, Enum):
+    PENDING = "pending"
+    PAID = "paid"
+    FAILED = "failed"
+
+
+class PayoutMethod(str, Enum):
+    WEEKLY = "weekly"
+    INSTANT = "instant"
+
+
+class SubscriptionStatus(str, Enum):
+    ACTIVE = "active"
+    CANCELED = "canceled"
+    PAST_DUE = "past_due"
+    EXPIRED = "expired"
+
+
+class DisputeStatus(str, Enum):
+    OPEN = "open"
+    IN_REVIEW = "in_review"
+    RESOLVED = "resolved"
+    REJECTED = "rejected"
+
+
+class NotificationChannel(str, Enum):
+    PUSH = "push"
+    IN_APP = "in_app"
+
+
+class NotificationStatus(str, Enum):
+    QUEUED = "queued"
+    SENT = "sent"
+    FAILED = "failed"
+    READ = "read"
+
+
 class User(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True)
     phone_number: str = Field(index=True, unique=True)
@@ -177,6 +221,7 @@ class Ride(SQLModel, table=True):
     dog_id: str = Field(foreign_key="dog.id", index=True)
     driver_user_id: str | None = Field(default=None, foreign_key="user.id", index=True)
     trusted_receiver_id: str | None = Field(default=None, foreign_key="trustedreceiver.id", index=True)
+    dog_count: int = 1
 
     pickup_label: str | None = None
     pickup_address: str
@@ -212,6 +257,9 @@ class Ride(SQLModel, table=True):
     cancellation_fee: float = 0.0
     cancellation_reason: str | None = None
     cancelled_at: datetime | None = None
+    dispatch_radius_km: float = 3.0
+    last_dispatch_at: datetime | None = None
+    matched_at: datetime | None = None
 
     requested_at: datetime = Field(default_factory=utcnow)
     accepted_at: datetime | None = None
@@ -354,4 +402,135 @@ class ReceiverVerificationAttempt(SQLModel, table=True):
     photo_url: str | None = None
     photo_match: bool = False
     success: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class RideDispatchAttempt(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    ride_id: str = Field(foreign_key="ride.id", index=True)
+    driver_user_id: str = Field(foreign_key="user.id", index=True)
+    sequence_number: int
+    radius_km: float
+    distance_km: float
+    offered_at: datetime = Field(default_factory=utcnow, index=True)
+    expires_at: datetime
+    responded_at: datetime | None = None
+    response: DriverOfferResponse = Field(default=DriverOfferResponse.PENDING, index=True)
+    decline_reason: str | None = None
+
+
+class RecurringRidePlan(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True)
+    owner_user_id: str = Field(foreign_key="user.id", index=True)
+    dog_id: str = Field(foreign_key="dog.id", index=True)
+    pickup_label: str | None = None
+    pickup_address: str
+    pickup_latitude: float | None = None
+    pickup_longitude: float | None = None
+    dropoff_label: str | None = None
+    dropoff_address: str
+    dropoff_latitude: float | None = None
+    dropoff_longitude: float | None = None
+    dropoff_type: DropoffType
+    trusted_receiver_id: str | None = Field(default=None, foreign_key="trustedreceiver.id")
+    recurring_rule: str
+    preferred_time_hhmm: str | None = None
+    special_instructions: str | None = None
+    distance_km: float = 0.0
+    duration_minutes: float = 0.0
+    dog_count: int = 1
+    is_active: bool = Field(default=True, index=True)
+    next_run_at: datetime = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class CameraSession(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True)
+    ride_id: str = Field(foreign_key="ride.id", index=True, unique=True)
+    stream_url: str
+    started_by_user_id: str = Field(foreign_key="user.id")
+    started_at: datetime = Field(default_factory=utcnow)
+    ended_at: datetime | None = None
+    is_active: bool = Field(default=True, index=True)
+    reconnect_count: int = 0
+    last_snapshot_at: datetime | None = None
+    snapshot_interval_minutes: int = 5
+
+
+class SubscriptionPlan(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True)
+    code: str = Field(index=True, unique=True)
+    name: str
+    monthly_price: float
+    discount_percent: float = Field(ge=0, le=100)
+    priority_matching: bool = False
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class UserSubscription(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True)
+    user_id: str = Field(foreign_key="user.id", index=True)
+    plan_id: str = Field(foreign_key="subscriptionplan.id", index=True)
+    status: SubscriptionStatus = Field(default=SubscriptionStatus.ACTIVE, index=True)
+    external_subscription_id: str | None = None
+    started_at: datetime = Field(default_factory=utcnow)
+    renews_at: datetime | None = None
+    ended_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class DriverPayout(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True)
+    driver_user_id: str = Field(foreign_key="user.id", index=True)
+    payment_id: str | None = Field(default=None, foreign_key="payment.id", index=True)
+    amount: float
+    currency: str = "usd"
+    status: PayoutStatus = Field(default=PayoutStatus.PENDING, index=True)
+    method: PayoutMethod = Field(default=PayoutMethod.WEEKLY)
+    fee_amount: float = 0.0
+    scheduled_for: datetime = Field(index=True)
+    processed_at: datetime | None = None
+    failure_reason: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class PlatformSetting(SQLModel, table=True):
+    key: str = Field(primary_key=True)
+    value: str
+    updated_by_user_id: str | None = Field(default=None, foreign_key="user.id")
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Dispute(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True)
+    ride_id: str = Field(foreign_key="ride.id", index=True)
+    opened_by_user_id: str = Field(foreign_key="user.id", index=True)
+    against_user_id: str | None = Field(default=None, foreign_key="user.id", index=True)
+    reason: str
+    details: str | None = None
+    status: DisputeStatus = Field(default=DisputeStatus.OPEN, index=True)
+    resolution_note: str | None = None
+    resolved_by_user_id: str | None = Field(default=None, foreign_key="user.id")
+    resolved_at: datetime | None = None
+    refund_payment_id: str | None = Field(default=None, foreign_key="payment.id", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class NotificationEvent(SQLModel, table=True):
+    id: str = Field(default_factory=new_id, primary_key=True)
+    user_id: str = Field(foreign_key="user.id", index=True)
+    channel: NotificationChannel = Field(default=NotificationChannel.PUSH, index=True)
+    notification_type: str = Field(index=True)
+    title: str
+    body: str
+    data_json: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    status: NotificationStatus = Field(default=NotificationStatus.QUEUED, index=True)
+    scheduled_for: datetime | None = Field(default=None, index=True)
+    sent_at: datetime | None = None
+    read_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow)

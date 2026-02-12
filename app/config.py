@@ -24,6 +24,17 @@ class Settings(BaseSettings):
     free_cancel_window_minutes: int = 2
     cancel_fee_en_route: float = 5.0
     cancel_fee_with_dog: float = 15.0
+    dispatch_offer_timeout_seconds: int = 15
+    dispatch_initial_radius_km: float = 3.0
+    dispatch_radius_step_km: float = 2.0
+    dispatch_max_radius_km: float = 20.0
+    driver_minimum_rating: float = 4.0
+    scheduled_match_lead_minutes: int = 30
+    camera_auto_snapshot_interval_minutes: int = 5
+    instant_payout_fee_percent: float = 1.5
+    weekly_payout_weekday: int = 0
+    default_pass_price_monthly: float = 29.99
+    default_pass_discount_percent: float = 10.0
 
 
 settings = Settings()
