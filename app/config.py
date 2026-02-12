@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     weekly_payout_weekday: int = 0
     default_pass_price_monthly: float = 29.99
     default_pass_discount_percent: float = 10.0
+    enable_background_jobs: bool = True
 
 
 settings = Settings()

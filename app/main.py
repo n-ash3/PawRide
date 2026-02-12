@@ -38,12 +38,14 @@ app.add_middleware(
 @app.on_event("startup")
 async def on_startup() -> None:
     init_db()
-    await background_worker.start()
+    if settings.enable_background_jobs:
+        await background_worker.start()
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    await background_worker.stop()
+    if settings.enable_background_jobs:
+        await background_worker.stop()
 
 
 @app.get("/health")
