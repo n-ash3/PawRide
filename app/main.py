@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse, Response
 
 from app.background import background_worker
 from app.config import settings
@@ -52,6 +53,16 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": settings.app_name}
+
+
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> Response:
+    return Response(status_code=204)
 
 
 app.include_router(auth.router)
